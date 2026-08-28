@@ -3,11 +3,13 @@ import os
 import sys
 import threading
 import tkinter as tk
+from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 import cv2
 import numpy as np
 import torch
+import torch.nn as nn
 from PIL import Image, ImageTk
 from tkinter import font as tkfont
 
@@ -15,7 +17,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CNN_DIR = os.path.join(ROOT, "cnn")
 YOLO_DIR = os.path.join(ROOT, "yolo")
 ML_DIR = os.path.join(ROOT, "machine learning", "src")
-for _d in (CNN_DIR, YOLO_DIR, ML_DIR):
+for _d in (YOLO_DIR, ML_DIR):
     if _d not in sys.path:
         sys.path.insert(0, _d)
 
@@ -39,32 +41,154 @@ def format_box(box):
     return (int(x), int(y), int(w), int(h))
 
 
+# CNN (custom 4-block CNN + YuNet detector) ==============================
+CNN_MODEL_PATH = Path(CNN_DIR) / "outputs_cnn" / "cnn_face_model.pth"
+CNN_CLASS_NAMES_PATH = Path(CNN_DIR) / "outputs_cnn" / "class_names.json"
+CNN_DETECTOR_PATH = Path(CNN_DIR) / "models" / "face_detection_yunet_2023mar.onnx"
+CNN_IMG_SIZE = (96, 96)
+CNN_MAX_FACES = 5
+CNN_SCORE_THRESHOLD = 0.70
+CNN_MIN_FACE_SIZE = (10, 10)
+CNN_MARGIN_RATIO = 0.20
+CNN_UNKNOWN_THRESHOLD = 0.80
+CNN_CLAHE = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+_CNN_DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+_CNN_MEAN = torch.tensor([0.485, 0.456, 0.406], device=_CNN_DEVICE).view(1, 3, 1, 1)
+_CNN_STD = torch.tensor([0.229, 0.224, 0.225], device=_CNN_DEVICE).view(1, 3, 1, 1)
+
+
+class CNNConvBlock(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, 3, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_channels, out_channels, 3, padding=1, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),
+            nn.Dropout(0.25),
+        )
+
+    def forward(self, x):
+        return self.block(x)
+
+
+class CNNFaceRecognizer(nn.Module):
+    def __init__(self, num_classes):
+        super().__init__()
+        self.stem = nn.Sequential(
+            CNNConvBlock(3, 32),
+            CNNConvBlock(32, 64),
+            CNNConvBlock(64, 128),
+            CNNConvBlock(128, 256),
+        )
+        self.head = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(256, 256),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.5),
+            nn.Linear(256, num_classes),
+        )
+
+    def forward(self, x):
+        return self.head(self.stem(x))
+
+
+def _cnn_align_face(img_rgb, face):
+    left_eye = (face[4], face[5])
+    right_eye = (face[6], face[7])
+    dx = right_eye[0] - left_eye[0]
+    dy = right_eye[1] - left_eye[1]
+    angle = np.degrees(np.arctan2(dy, dx))
+    center = ((left_eye[0] + right_eye[0]) / 2, (left_eye[1] + right_eye[1]) / 2)
+    M = cv2.getRotationMatrix2D(center, angle, 1.0)
+    return cv2.warpAffine(img_rgb, M, (img_rgb.shape[1], img_rgb.shape[0]),
+                          flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+
+
+def _cnn_crop_face(frame, face_data):
+    face, fx, fy, fw, fh, _ = face_data
+    h_frame, w_frame = frame.shape[:2]
+    mh, mw = int(fh * CNN_MARGIN_RATIO), int(fw * CNN_MARGIN_RATIO)
+    y1, y2 = max(0, fy - mh), min(h_frame, fy + fh + mh)
+    x1, x2 = max(0, fx - mw), min(w_frame, fx + fw + mw)
+    img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    img_rgb = _cnn_align_face(img_rgb, face)
+    img_rgb = img_rgb[y1:y2, x1:x2]
+    img_gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY)
+    img_gray = CNN_CLAHE.apply(img_gray)
+    img_rgb = cv2.cvtColor(img_gray, cv2.COLOR_GRAY2RGB)
+    if img_rgb.size == 0:
+        return None
+    return cv2.resize(img_rgb, CNN_IMG_SIZE)
+
+
+@torch.no_grad()
+def _cnn_predict_faces(model, class_names, crops_rgb):
+    batch = np.stack(crops_rgb).astype(np.float32)
+    X = torch.from_numpy(batch).permute(0, 3, 1, 2).to(_CNN_DEVICE) / 255.0
+    X = (X - _CNN_MEAN) / _CNN_STD
+    probs = torch.softmax(model(X), dim=1).cpu().numpy()
+    results = []
+    for p in probs:
+        idx = int(np.argmax(p))
+        results.append((class_names[idx], float(p[idx])))
+    return results
+
+
 class CNNBackend:
     name = "CNN"
     icon = "CNN"
 
     def load(self):
-        import webcam_test as cnn_mod
-        self.mod = cnn_mod
-        cnn_mod.MIN_FACE_SIZE = (10, 10)
-        self.model, self.class_names, self.detector = cnn_mod.load_resources()
+        if not CNN_MODEL_PATH.exists() or not CNN_CLASS_NAMES_PATH.exists():
+            raise FileNotFoundError(
+                "CNN model artifacts not found. Run cnn.py first to train the CNN."
+            )
+        if not CNN_DETECTOR_PATH.exists():
+            raise FileNotFoundError(
+                f"Face detector not found at {CNN_DETECTOR_PATH}."
+            )
+        checkpoint = torch.load(CNN_MODEL_PATH, map_location=_CNN_DEVICE)
+        with open(CNN_CLASS_NAMES_PATH) as f:
+            self.class_names = json.load(f)
+        self.model = CNNFaceRecognizer(len(self.class_names)).to(_CNN_DEVICE)
+        self.model.load_state_dict(checkpoint["state_dict"])
+        self.model.eval()
+        self.detector = cv2.FaceDetectorYN_create(
+            str(CNN_DETECTOR_PATH), "",
+            (320, 240),
+            score_threshold=CNN_SCORE_THRESHOLD,
+        )
 
     def recognize(self, frame):
-        m = self.mod
-        boxes = m.detect_faces(frame, self.detector)
         ann = frame.copy()
         results = []
+        self.detector.setInputSize((frame.shape[1], frame.shape[0]))
+        _, faces = self.detector.detect(frame)
+        boxes = []
+        if faces is not None:
+            for face in faces:
+                x, y, w, h = int(face[0]), int(face[1]), int(face[2]), int(face[3])
+                score = float(face[14])
+                if w >= CNN_MIN_FACE_SIZE[0] and h >= CNN_MIN_FACE_SIZE[1]:
+                    boxes.append((face, x, y, w, h, score))
+            boxes.sort(key=lambda r: r[5], reverse=True)
+            boxes = boxes[:CNN_MAX_FACES]
         if not boxes:
             return ann, results
-        crops = [c for c in (m.crop_face(frame, b) for b in boxes)
+        crops = [c for c in (_cnn_crop_face(frame, b) for b in boxes)
                  if c is not None]
         if not crops:
             return ann, results
-        preds = m.predict_faces(self.model, self.class_names, crops)
+        preds = _cnn_predict_faces(self.model, self.class_names, crops)
         for face_data, (name, conf) in zip(boxes, preds):
             _, x, y, w, h, _ = face_data
             box = format_box((x, y, w, h))
-            if conf < m.UNKNOWN_THRESHOLD:
+            if conf < CNN_UNKNOWN_THRESHOLD:
                 label, color = "Unknown", UNKNOWN_COLOR
             else:
                 label, color = f"{name} {conf * 100:.0f}%", KNOWN_COLOR

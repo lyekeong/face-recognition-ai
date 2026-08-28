@@ -554,10 +554,6 @@ def main():
     p_rec.add_argument("--no-display", action="store_true",
                        help="Do not pop up a display window (headless)")
 
-    p_web = sub.add_parser("webcam", help="Run the live webcam demo")
-    p_web.add_argument("--camera", type=int, default=0,
-                       help="Camera index (default 0)")
-
     args = parser.parse_args()
 
     if args.command == "train":
@@ -566,10 +562,6 @@ def main():
         evaluate()
     elif args.command == "recognize":
         recognize_image(args.image, display=not args.no_display)
-    elif args.command == "webcam":
-        # Webcam lives in webcam.py; delegate to avoid duplicating it here.
-        import webcam
-        webcam.run_webcam(camera_index=args.camera)
     else:
         parser.print_help()
 

@@ -207,7 +207,7 @@ def main():
     save_arch_json(arch_file, args.backbone, num_classes,
                    class_names, best_val_acc, test_acc)
     print(f"Arch info saved to {arch_file}")
-    print("NOTE: arch.json points both evaluate.py and webcam_demo.py to "
+    print("NOTE: arch.json points evaluate.py and the GUI (yolo backend) to "
           "the architecture of the LAST trained model. For inference with a "
           "different backbone, retrain or edit the file.")
 
