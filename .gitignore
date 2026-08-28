@@ -1,0 +1,6 @@
+﻿# dataset images (regenerable / large)
+dataset_split/
+# python caches + runtime dirs
+__pycache__/
+*.pyc
+snapshots/

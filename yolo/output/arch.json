@@ -1,0 +1,25 @@
+{
+  "backbone": "resnet18",
+  "num_classes": 17,
+  "class_names": [
+    "Angelina Jolie",
+    "Brad Pitt",
+    "Denzel Washington",
+    "Hugh Jackman",
+    "Jennifer Lawrence",
+    "Johnny Depp",
+    "Kate Winslet",
+    "Leonardo DiCaprio",
+    "Megan Fox",
+    "Natalie Portman",
+    "Nicole Kidman",
+    "Robert Downey Jr",
+    "Sandra Bullock",
+    "Scarlett Johansson",
+    "Tom Cruise",
+    "Tom Hanks",
+    "Will Smith"
+  ],
+  "val_acc": 0.9907,
+  "test_acc": 0.8833
+}
