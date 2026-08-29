@@ -1,0 +1,9 @@
+metric,value
+accuracy_argmax,0.7667
+precision_macro,0.7761
+recall_macro,0.7544
+f1_macro,0.7540
+gate_threshold,0.5
+gate_precision,0.8447
+gate_recall,0.7250
+gate_decided,309

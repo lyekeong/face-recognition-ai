@@ -81,7 +81,7 @@ def load_ml():
     r = read_csv(ML_RESULTS)
     return {
         "method": "HOG+SVM",
-        "algorithm": "HOG features + PCA + RBF SVM (isotonic)",
+        "algorithm": "HOG features + PCA (v2, 1200 comps) + RBF SVM (isotonic)",
         "test_accuracy": r["accuracy_argmax"],
         "precision_macro": r["precision_macro"],
         "recall_macro": r["recall_macro"],
@@ -91,7 +91,8 @@ def load_ml():
         "gate_recall": r["gate_recall"],
         "pipeline_acc": float("nan"),
         "pipeline_acc_detected": float("nan"),
-        "notes": "Calibrated confidences saturate near 0.72, so gate uses 0.50.",
+        "notes": "Refined v2 pipeline (margin-cropped 224px face, no 80px gate). "
+                 "Calibrated confidence max ~0.86, so gate stays at 0.50.",
     }
 
 

@@ -1,0 +1,23 @@
+                    precision    recall  f1-score   support
+
+    Angelina Jolie       0.80      0.80      0.80        20
+         Brad Pitt       0.88      0.70      0.78        20
+ Denzel Washington       0.67      1.00      0.80        20
+      Hugh Jackman       0.50      0.50      0.50        20
+ Jennifer Lawrence       0.67      0.80      0.73        20
+       Johnny Depp       0.90      0.90      0.90        20
+      Kate Winslet       0.75      0.45      0.56        20
+ Leonardo DiCaprio       0.75      0.75      0.75        20
+         Megan Fox       0.79      0.75      0.77        20
+   Natalie Portman       0.79      0.75      0.77        20
+     Nicole Kidman       0.91      1.00      0.95        20
+  Robert Downey Jr       0.87      0.65      0.74        20
+    Sandra Bullock       0.92      0.55      0.69        20
+Scarlett Johansson       0.85      0.97      0.91        40
+        Tom Cruise       0.73      0.80      0.76        20
+         Tom Hanks       0.87      0.65      0.74        20
+        Will Smith       0.57      0.80      0.67        20
+
+          accuracy                           0.77       360
+         macro avg       0.78      0.75      0.75       360
+      weighted avg       0.78      0.77      0.76       360

@@ -1,4 +1,4 @@
 method,algorithm,test_accuracy,precision_macro,recall_macro,f1_macro,gate_threshold,gate_precision,gate_recall,pipeline_acc,pipeline_acc_detected,notes
 CNN,Custom CNN (4 conv blocks) + YuNet detector,0.8055555555555556,0.8352490693350877,0.7999999999999999,0.8010099149747748,>= 0.80 (webcam only),nan,nan,nan,nan,No gated evaluation saved; webcam rejects confidence < 0.80.
 YOLO,YuNet detector + ResNet18 classifier,0.8833,0.7383,0.6368,0.6334,>= 0.80,0.9706,0.1833,0.6528,0.7134,accuracy is pure classifier test acc; pipeline acc counts undetected faces as wrong.
-HOG+SVM,HOG features + PCA + RBF SVM (isotonic),0.4806,0.5228,0.4647,0.4679,>= 0.50,0.7347,0.3,nan,nan,"Calibrated confidences saturate near 0.72, so gate uses 0.50."
+HOG+SVM,"HOG features + PCA (v2, 1200 comps) + RBF SVM (isotonic)",0.7667,0.7761,0.7544,0.754,>= 0.50,0.8447,0.725,nan,nan,"Refined v2 pipeline (margin-cropped 224px face, no 80px gate). Calibrated confidence max ~0.86, so gate stays at 0.50."
