@@ -155,28 +155,32 @@ def main():
           f"baseline.")
 
     # Grouped bar chart -------------------------------------------------------
-    metrics = ["test_accuracy", "precision_macro", "recall_macro", "f1_macro"]
-    labels = ["Accuracy", "Precision", "Recall", "F1"]
+    metrics = ["test_accuracy", "precision_macro", "recall_macro", "f1_macro",
+               "gate_precision", "gate_recall"]
+    labels = ["Accuracy", "Precision", "Recall", "F1",
+              "Gate P", "Gate R"]
     x = np.arange(len(labels))
     width = 0.26
 
-    fig, ax = plt.subplots(figsize=(11, 6.5))
+    fig, ax = plt.subplots(figsize=(13, 7))
     colors = ["#4C72B0", "#DD8452", "#55A868"]
     for i, r in enumerate(rows):
         vals = [r[k] for k in metrics]
-        bars = ax.bar(x + (i - 1) * width, vals, width,
-                      label=r["method"], color=colors[i % len(colors)],
+        bars = ax.bar(x + (i - 1) * width, np.where(np.isnan(vals), 0, vals),
+                      width, label=r["method"], color=colors[i % len(colors)],
                       edgecolor="black", linewidth=0.5)
         for b, v in zip(bars, vals):
-            ax.text(b.get_x() + b.get_width() / 2, b.get_height() + 0.01,
-                    f"{v:.3f}", ha="center", va="bottom", fontsize=8)
+            if not np.isnan(v):
+                ax.text(b.get_x() + b.get_width() / 2, b.get_height() + 0.01,
+                        f"{v:.3f}", ha="center", va="bottom", fontsize=8)
 
     ax.set_xticks(x)
     ax.set_xticklabels(labels)
     ax.set_ylim(0, 1.12)
     ax.set_ylabel("Score")
     ax.set_title("Face Recognition - Method Comparison "
-                 "(CNN vs YOLO/ResNet18 vs HOG+SVM)", fontsize=12)
+                 "(CNN vs YOLO/ResNet18 vs HOG+SVM; Gate P/R at "
+                 "0.60 / 0.60 / 0.70)", fontsize=12)
     ax.legend(loc="upper right", ncol=3, frameon=False)
     ax.grid(axis="y", linestyle="--", alpha=0.4)
     fig.tight_layout()
