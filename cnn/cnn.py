@@ -1,5 +1,4 @@
 import json
-import os
 from pathlib import Path
 
 import cv2
@@ -276,12 +275,20 @@ def evaluate_model(model, X_test, y_test, class_names, output_dir):
             probas.append(out.cpu().numpy())
     probs = np.concatenate(probas, axis=0)
     y_pred = np.argmax(probs, axis=1)
+    mc = probs.max(axis=1)
+    gate = 0.60
+    gate_correct = (mc >= gate) & (y_pred == y_test)
+    gate_n = int((mc >= gate).sum())
     metrics = {
         "test_accuracy": float(accuracy_score(y_test, y_pred)),
         "precision_macro": float(precision_score(y_test, y_pred, average="macro", zero_division=0)),
         "recall_macro": float(recall_score(y_test, y_pred, average="macro")),
         "f1_macro": float(f1_score(y_test, y_pred, average="macro")),
         "f1_weighted": float(f1_score(y_test, y_pred, average="weighted")),
+        "gate_threshold": gate,
+        "gate_precision": float(gate_correct.sum() / max(gate_n, 1)),
+        "gate_recall": float(gate_correct.sum() / len(y_test)),
+        "gate_decided": gate_n,
     }
     report = classification_report(
         y_test, y_pred, target_names=class_names, digits=4

@@ -34,6 +34,7 @@ def read_csv(path, key_ix=0, val_ix=1):
 def load_cnn():
     with open(CNN_METRICS, "r", encoding="utf-8") as fh:
         m = json.load(fh)
+    has_gate = "gate_precision" in m
     return {
         "method": "CNN",
         "algorithm": "Custom CNN (4 conv blocks) + YuNet detector",
@@ -41,12 +42,17 @@ def load_cnn():
         "precision_macro": m["precision_macro"],
         "recall_macro": m["recall_macro"],
         "f1_macro": m["f1_macro"],
-        "gate_threshold": ">= 0.80 (webcam only)",
-        "gate_precision": float("nan"),
-        "gate_recall": float("nan"),
+        "gate_threshold": (f">= {m['gate_threshold']:.2f}"
+                           if has_gate else ">= 0.60 (webcam only)"),
+        "gate_precision": (float(m["gate_precision"]) if has_gate
+                           else float("nan")),
+        "gate_recall": (float(m["gate_recall"]) if has_gate
+                        else float("nan")),
         "pipeline_acc": float("nan"),
         "pipeline_acc_detected": float("nan"),
-        "notes": "No gated evaluation saved; webcam rejects confidence < 0.80.",
+        "notes": ("Gated evaluation on test set at the shared threshold."
+                  if has_gate
+                  else "No gated evaluation saved; webcam rejects confidence < 0.60."),
     }
 
 
@@ -54,9 +60,9 @@ def load_yolo():
     r = read_csv(YOLO_RESULTS)
     with open(YOLO_ARCH, "r", encoding="utf-8") as fh:
         arch = json.load(fh)
-    g08 = ("gate_0.80_precision", "gate_0.80_recall")
-    g08p = r.get(g08[0], float("nan"))
-    g08r = r.get(g08[1], float("nan"))
+    g06 = ("gate_0.60_precision", "gate_0.60_recall")
+    g06p = r.get(g06[0], float("nan"))
+    g06r = r.get(g06[1], float("nan"))
     bb = arch.get("backbone", "?")
     if isinstance(bb, str) and bb.lower().startswith("resnet"):
         bb = "ResNet" + bb[6:]
@@ -67,9 +73,9 @@ def load_yolo():
         "precision_macro": r["precision_macro"],
         "recall_macro": r["recall_macro"],
         "f1_macro": r["f1_macro"],
-        "gate_threshold": ">= 0.80",
-        "gate_precision": g08p,
-        "gate_recall": g08r,
+        "gate_threshold": ">= 0.60",
+        "gate_precision": g06p,
+        "gate_recall": g06r,
         "pipeline_acc": r["accuracy_argmax_all"],
         "pipeline_acc_detected": r["accuracy_argmax_detected"],
         "notes": "accuracy is pure classifier test acc; pipeline acc counts undetected "
@@ -92,7 +98,7 @@ def load_ml():
         "pipeline_acc": float("nan"),
         "pipeline_acc_detected": float("nan"),
         "notes": "Refined v2 pipeline (margin-cropped 224px face, no 80px gate). "
-                 "Calibrated confidence max ~0.86, so gate stays at 0.50.",
+                 "Calibrated confidence max ~0.86, gate set to 0.70.",
     }
 
 
@@ -128,7 +134,6 @@ def main():
     print(f"  {'Method':<10}{'Accuracy':>9}{'Precision':>10}{'Recall':>9}{'F1':>9}"
           f"{'Gate P':>8}{'Gate R':>8}{'PipeAcc':>9}")
     for r in rows:
-        fmt = lambda **kw: ""
         print(f"  {r['method']:<10}"
               f"{r['test_accuracy']:>9.3f}"
               f"{r['precision_macro']:>10.3f}"
@@ -150,7 +155,6 @@ def main():
           f"baseline.")
 
     # Grouped bar chart -------------------------------------------------------
-    methods = [r["method"] for r in rows]
     metrics = ["test_accuracy", "precision_macro", "recall_macro", "f1_macro"]
     labels = ["Accuracy", "Precision", "Recall", "F1"]
     x = np.arange(len(labels))

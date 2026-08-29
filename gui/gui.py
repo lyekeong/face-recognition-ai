@@ -50,7 +50,7 @@ CNN_MAX_FACES = 5
 CNN_SCORE_THRESHOLD = 0.70
 CNN_MIN_FACE_SIZE = (10, 10)
 CNN_MARGIN_RATIO = 0.20
-CNN_UNKNOWN_THRESHOLD = 0.80
+CNN_UNKNOWN_THRESHOLD = 0.60
 CNN_CLAHE = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 _CNN_DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 _CNN_MEAN = torch.tensor([0.485, 0.456, 0.406], device=_CNN_DEVICE).view(1, 3, 1, 1)
@@ -202,6 +202,7 @@ class CNNBackend:
 class YOLOBackend:
     name = "YOLO (ResNet18)"
     icon = "YOLO"
+    unknown_threshold = 0.60
 
     def load(self):
         from torchvision import transforms
@@ -260,7 +261,7 @@ class YOLOBackend:
                     max_prob, predicted = torch.max(proba, 0)
                 conf = float(max_prob.item())
                 name = self.class_names[predicted.item()]
-                if conf < 0.80:
+                if conf < self.unknown_threshold:
                     label, color = "Unknown", UNKNOWN_COLOR
                 else:
                     label, color = f"{name} ({conf:.2f})", KNOWN_COLOR
@@ -303,7 +304,6 @@ class MLBackend:
 
 BACKENDS = {"CNN": CNNBackend, "YOLO (ResNet18)": YOLOBackend,
             "HOG + SVM": MLBackend}
-
 
 class FaceRecognitionApp:
     def __init__(self, root):
@@ -394,7 +394,7 @@ class FaceRecognitionApp:
         try:
             self._ensure_backend(name)
         except Exception as exc:  # noqa: BLE001
-            self.root.after(0, lambda: self._report_error(name, exc))
+            self.root.after(0, lambda e=exc: self._report_error(name, e))
             return
         self.root.after(0, lambda: self._set_status_color(
             f"{name} model loaded. Open an image or start the webcam."))
@@ -437,7 +437,7 @@ class FaceRecognitionApp:
                 raise ValueError(f"Cannot read image: {path}")
             ann, results = backend.recognize(frame)
         except Exception as exc:  # noqa: BLE001
-            self.root.after(0, lambda: self._report_error(self.current, exc))
+            self.root.after(0, lambda e=exc: self._report_error(self.current, e))
             self.root.after(0, lambda: self.model_cb.state(["!disabled"]))
             return
         self.root.after(0, lambda: self._finish_image(ann, results, path))
@@ -482,7 +482,7 @@ class FaceRecognitionApp:
             self._webcam_on = False
             if self._cam is not None:
                 self._cam.release()
-            self.root.after(0, lambda: self._report_error(self.current, exc))
+            self.root.after(0, lambda e=exc: self._report_error(self.current, e))
             self.root.after(0, self._reset_controls)
 
     def _poll_webcam(self):

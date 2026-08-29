@@ -1,3 +1,18 @@
+"""HOG + SVM face recognition (single refined pipeline).
+
+This is the pipeline behind the comparison table and report metrics:
+  224x224 images, HOG cell size 16, PCA-1200 (float32),
+  full GridSearchCV + isotonic calibration (cv=5),
+  relaxed face crops with no size gate (mode "crop", default)
+  or direct whole images (mode "direct").
+
+The original v1 baseline (128x128, gated crops) was removed; the GUI's
+HOG+SVM backend now runs this pipeline (mode "crop") as its default.
+
+Unknown-gate convention: CONF_THRESHOLD = GATE = 0.70.
+Evaluation writes the reference metric files to output/:
+  results.csv, per_image.csv, classification_report.txt, confusion_matrix.png
+"""
 import argparse
 import os
 import pickle
@@ -12,23 +27,16 @@ import matplotlib.pyplot as plt
 import numpy as np
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.decomposition import PCA
-from sklearn.experimental import enable_halving_search_cv
 from sklearn.metrics import (accuracy_score, classification_report,
                              confusion_matrix, f1_score, precision_score,
                              recall_score, ConfusionMatrixDisplay)
-from sklearn.model_selection import HalvingGridSearchCV, train_test_split
+from sklearn.model_selection import GridSearchCV, train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 
 # Shared configuration =====================================================
 SEED = 42
-IMAGE_SIZE = 128          # spatial size used for HOG features
-HOG_CELL = 8
-HOG_BLOCK = 2
-HOG_BINS = 12
 FACE_CROP_MARGIN = 0.20
-MIN_FACE_SIZE = (80, 80)
-PCA_COMPONENTS = 400
 DETECTOR_SIZE = (640, 640)
 DETECTOR_CONF = 0.70
 
@@ -39,39 +47,46 @@ DATA_DIR = os.path.join(os.path.dirname(PROJECT_DIR), "dataset_split")
 MODEL_DIR = os.path.join(PROJECT_DIR, "models")
 OUTPUT_DIR = os.path.join(PROJECT_DIR, "output")
 
-PREPROCESS_PKL = os.path.join(MODEL_DIR, "preprocess.pkl")
-MODEL_PKL = os.path.join(MODEL_DIR, "svm_model.joblib")
-OUT_CSV = os.path.join(OUTPUT_DIR, "results.csv")
-OUT_CM = os.path.join(OUTPUT_DIR, "confusion_matrix.png")
-OUT_IMG = os.path.join(OUTPUT_DIR, "per_image.csv")
-
-# ML-specific unknown gate. Calibrated SVM confidence saturates low
-# (isotonic calibration in 17-class ovr; max achievable confidence on the
-# test set is 0.716), so a threshold of 0.50 is the best practical
-# precision/recall balance for the ML model (test precision ~0.735 /
-# recall ~0.30). CNN/YOLO keep a higher 0.80 gate.
-CONF_THRESHOLD = 0.50
-GATE = 0.50
+CONF_THRESHOLD = 0.70
+GATE = 0.70
 
 MODEL_URL = ("https://github.com/opencv/opencv_zoo/raw/main/models/"
              "face_detection_yunet/face_detection_yunet_2023mar.onnx")
+DETECTOR_PATH = os.path.join(MODEL_DIR, "face_detection_yunet_2023mar.onnx")
+
+if not os.path.exists(DETECTOR_PATH):
+    os.makedirs(MODEL_DIR, exist_ok=True)
+    print("Downloading YuNet face detection model...")
+    urllib.request.urlretrieve(MODEL_URL, DETECTOR_PATH)
+
+
+# Pipeline configuration ===================================================
+PARAM_GRID = {
+    "C": [1.0, 10.0, 100.0],
+    "gamma": ["scale", 0.001],
+}
+
+
+def config(mode="crop"):
+    """Resolve pipeline settings + artifact filenames for an input mode."""
+    if mode not in ("crop", "direct"):
+        raise ValueError(f"Unknown mode {mode!r} (use 'crop' or 'direct')")
+    return {
+        "crop_style": "relaxed" if mode == "crop" else "direct",
+        "image_size": 224,
+        "hog_cell": 16,
+        "hog_block": 2,
+        "hog_bins": 12,
+        "pca_components": 1200,
+        "params": PARAM_GRID,
+        "preprocess": f"preprocess_{mode}.pkl",
+        "model": f"svm_model_{mode}.joblib",
+    }
 
 
 # Face detection ===========================================================
-def ensure_model():
-    if not os.path.exists(DETECTOR_PATH):
-        os.makedirs(MODEL_DIR, exist_ok=True)
-        print("Downloading YuNet face detection model...")
-        urllib.request.urlretrieve(MODEL_URL, DETECTOR_PATH)
-    return DETECTOR_PATH
-
-
-DETECTOR_PATH = os.path.join(MODEL_DIR, "face_detection_yunet_2023mar.onnx")
-
-
 class FaceDetector:
     def __init__(self, input_size=(320, 320), conf_threshold=0.6):
-        ensure_model()
         self.det = cv2.FaceDetectorYN_create(DETECTOR_PATH, "", input_size)
         self.det.setScoreThreshold(conf_threshold)
 
@@ -83,23 +98,6 @@ class FaceDetector:
             return None
         return np.asarray(faces)
 
-    def detect(self, frame):
-        faces = self.detect_raw(frame)
-        if faces is None:
-            return []
-        out = []
-        for f in faces:
-            x, y, ww, hh = f[0], f[1], f[2], f[3]
-            conf = f[14] if f.shape[0] > 14 else f[-1]
-            out.append((x, y, ww, hh, conf))
-        return out
-
-    def detect_largest(self, frame):
-        faces = self.detect(frame)
-        if not faces:
-            return None
-        return max(faces, key=lambda f: f[2] * f[3])
-
 
 def make_detector():
     return FaceDetector(input_size=DETECTOR_SIZE, conf_threshold=DETECTOR_CONF)
@@ -108,10 +106,7 @@ def make_detector():
 # HOG descriptor ===========================================================
 class HOG:
 
-    def __init__(self, cell_size=8, block_size=2, nbins=9,
-                 pixels_per_cell=None):
-        if pixels_per_cell is not None:
-            cell_size = pixels_per_cell[0]
+    def __init__(self, cell_size=8, block_size=2, nbins=9):
         self.cell_size = cell_size
         self.block_size = block_size
         self.nbins = nbins
@@ -177,16 +172,10 @@ class HOG:
             return np.zeros(0, dtype=np.float32)
         return np.concatenate(blocks).astype(np.float32)
 
-    def descriptor_size(self, height, width):
-        nc_y = height // self.cell_size
-        nc_x = width // self.cell_size
-        blocks = (nc_y - self.block_size + 1) * (nc_x - self.block_size + 1)
-        return blocks * self.block_size * self.block_size * self.nbins
-
 
 def make_hog(pp_art=None):
     if pp_art is None:
-        return HOG(cell_size=HOG_CELL, block_size=HOG_BLOCK, nbins=HOG_BINS)
+        return HOG(cell_size=8, block_size=2, nbins=12)
     return HOG(cell_size=pp_art["hog_cell"], block_size=pp_art["hog_block"],
                nbins=pp_art["hog_bins"])
 
@@ -204,15 +193,13 @@ def align_face(img_rgb, face):
                           flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
 
 
-def detect_align_crop(frame_bgr, detector):
+def detect_align_crop_relaxed(frame_bgr, detector):
+    """Highest-confidence face, eye-aligned, margin crop, any size."""
     faces = detector.detect_raw(frame_bgr)
-    if faces is None:
+    if faces is None or len(faces) == 0:
         return frame_bgr, None
-    f = max(faces, key=lambda f: float(f[2] * f[3]))
-    fx, fy = float(f[0]), float(f[1])
-    fw, fh = float(f[2]), float(f[3])
-    if fw < MIN_FACE_SIZE[0] or fh < MIN_FACE_SIZE[1]:
-        return frame_bgr, None
+    f = max(faces, key=lambda f: float(f[14]))
+    fx, fy, fw, fh = float(f[0]), float(f[1]), float(f[2]), float(f[3])
     box = (int(fx), int(fy), int(fx + fw), int(fy + fh))
 
     img_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
@@ -229,17 +216,11 @@ def detect_align_crop(frame_bgr, detector):
     return cv2.cvtColor(face_rgb, cv2.COLOR_RGB2BGR), box
 
 
-def preprocess_gray(src_bgr, size=IMAGE_SIZE):
+def preprocess_gray(src_bgr, size=128):
     gray = cv2.cvtColor(src_bgr, cv2.COLOR_BGR2GRAY)
     gray = CLAHE.apply(gray)
     gray = cv2.resize(gray, (size, size), interpolation=cv2.INTER_AREA)
     return gray
-
-
-def frame_to_features(frame_bgr, detector, hog, image_size=IMAGE_SIZE):
-    face_bgr, box = detect_align_crop(frame_bgr, detector)
-    gray = preprocess_gray(face_bgr, size=image_size)
-    return hog.compute(gray).reshape(1, -1), box
 
 
 def transform_features(feat, pp_art):
@@ -250,9 +231,12 @@ def transform_features(feat, pp_art):
     return F
 
 
-def load_features_from_folders(root, detector, hog):
-    classes = sorted([d for d in os.listdir(root)
-                      if os.path.isdir(os.path.join(root, d))])
+def load_features(root, cfg, hog):
+    """Extract HOG features for a folder tree using the pipeline crop style."""
+    style = cfg["crop_style"]
+    detector = make_detector() if style == "relaxed" else None
+    classes = sorted(d for d in os.listdir(root)
+                     if os.path.isdir(os.path.join(root, d)))
     feats, y = [], []
     for label in classes:
         class_dir = os.path.join(root, label)
@@ -263,116 +247,92 @@ def load_features_from_folders(root, detector, hog):
             img = cv2.imread(path)
             if img is None:
                 continue
-            feat, _ = frame_to_features(img, detector, hog)
-            feats.append(feat)
+            if style == "relaxed":
+                img, _ = detect_align_crop_relaxed(img, detector)
+            gray = preprocess_gray(img, size=cfg["image_size"])
+            feats.append(hog.compute(gray).reshape(-1))
             y.append(label)
-    return np.vstack(feats), np.array(y)
+    return np.vstack(feats).astype(np.float32), np.array(y)
 
 
-def build_and_save_preprocess(train_root=os.path.join(DATA_DIR, "train"),
-                              test_root=os.path.join(DATA_DIR, "test")):
-    detector = make_detector()
-    hog = make_hog()
-
-    print("Extracting HOG features (train)...")
-    F_train, y_train_names = load_features_from_folders(train_root, detector, hog)
+def build_and_save_preprocess(cfg, train_root=os.path.join(DATA_DIR, "train")):
+    hog = HOG(cell_size=cfg["hog_cell"], block_size=cfg["hog_block"],
+              nbins=cfg["hog_bins"])
+    print(f"Extracting HOG features "
+          f"({cfg['image_size']}x{cfg['image_size']}, "
+          f"bins={cfg['hog_bins']}, cell={cfg['hog_cell']})...")
+    F_train, y_train_names = load_features(train_root, cfg, hog)
     print(f"  train feature shape: {F_train.shape}")
-    print("Extracting HOG features (test)...")
-    F_test, y_test_names = load_features_from_folders(test_root, detector, hog)
-    print(f"  test feature shape:  {F_test.shape}")
 
-    # Build label map from training classes only
     classes = sorted(set(y_train_names))
     label_to_idx = {c: i for i, c in enumerate(classes)}
     idx_to_label = {i: c for c, i in label_to_idx.items()}
-
     y_train = np.array([label_to_idx[c] for c in y_train_names])
-    # Dropping test samples whose class is not present in training
-    keep = np.array([c in label_to_idx for c in y_test_names])
-    F_test = F_test[keep]
-    y_test = np.array([label_to_idx[c] for c in y_test_names if c in label_to_idx])
-
     print(f"Train images: {len(F_train)}, classes: {len(classes)}")
-    print(f"Test images:  {len(F_test)}")
 
-    # Standard scaling (fit on train only)
     scaler = StandardScaler()
-    F_train = scaler.fit_transform(F_train)
-    F_test = scaler.transform(F_test)
+    F_train = scaler.fit_transform(F_train).astype(np.float32)
 
-    # Dimensionality reduction (fit on train only)
-    pca = None
-    if F_train.shape[1] > PCA_COMPONENTS:
-        pca = PCA(n_components=PCA_COMPONENTS, random_state=SEED)
-        F_train = pca.fit_transform(F_train)
-        F_test = pca.transform(F_test)
-        print(f"PCA applied: {F_train.shape[1]} components "
-              f"(explained var {pca.explained_variance_ratio_.sum():.3f})")
+    pca = PCA(n_components=cfg["pca_components"], svd_solver="randomized",
+              random_state=SEED)
+    F_train = pca.fit_transform(F_train).astype(np.float32)
+    print(f"PCA applied: {F_train.shape[1]} components "
+          f"(explained var {pca.explained_variance_ratio_.sum():.3f})")
 
-    # Persist everything needed for inference later
     preprocess = {
+        "crop_style": cfg["crop_style"],
         "classes": classes,
         "label_to_idx": label_to_idx,
         "idx_to_label": idx_to_label,
         "scaler": scaler,
         "pca": pca,
-        "image_size": IMAGE_SIZE,
-        "hog_cell": HOG_CELL,
-        "hog_block": HOG_BLOCK,
-        "hog_bins": HOG_BINS,
+        "image_size": cfg["image_size"],
+        "hog_cell": cfg["hog_cell"],
+        "hog_block": cfg["hog_block"],
+        "hog_bins": cfg["hog_bins"],
         "face_crop_margin": FACE_CROP_MARGIN,
-        "min_face_size": MIN_FACE_SIZE,
     }
     os.makedirs(MODEL_DIR, exist_ok=True)
-    with open(PREPROCESS_PKL, "wb") as fh:
+    preprocess_path = os.path.join(MODEL_DIR, cfg["preprocess"])
+    with open(preprocess_path, "wb") as fh:
         pickle.dump(preprocess, fh)
-    print(f"Preprocess saved to {PREPROCESS_PKL}")
+    print(f"Preprocess saved to {preprocess_path}")
+    return F_train, y_train, preprocess
 
-    return (F_train, y_train), (F_test, y_test), preprocess
 
-
-def load_preprocess():
-    with open(PREPROCESS_PKL, "rb") as fh:
+def load_preprocess(mode="crop"):
+    cfg = config(mode)
+    path = os.path.join(MODEL_DIR, cfg["preprocess"])
+    with open(path, "rb") as fh:
         return pickle.load(fh)
 
 
-def load_model_and_preprocess():
-    pp_art = load_preprocess()
-    model = joblib.load(MODEL_PKL)
+def load_model_and_preprocess(mode="crop"):
+    pp_art = load_preprocess(mode)
+    cfg = config(mode)
+    model = joblib.load(os.path.join(MODEL_DIR, cfg["model"]))
     hog = make_hog(pp_art)
     return model, hog, pp_art
 
 
 # Training =================================================================
-PARAM_GRID = {
-    "C": [0.1, 1.0, 10.0, 100.0],
-    "gamma": ["scale", 0.001, 0.0005],
-}
+def train(mode="crop"):
+    cfg = config(mode)
 
-
-def train():
-    # Build features and preprocess artifacts (shared pipeline with scaler+PCA).
-    (F_train, y_train), (F_test, y_test), pp = build_and_save_preprocess()
+    F_train, y_train, pp = build_and_save_preprocess(cfg)
     print(f"Train feature shape: {F_train.shape}")
-    print(f"Test feature shape:  {F_test.shape}")
 
-    # Tuning/validation split (stratified, train only)
     F_tr, F_va, y_tr, y_va = train_test_split(
         F_train, y_train, test_size=0.15, stratify=y_train, random_state=SEED)
     print(f"\nTuning split: train={len(F_tr)}, val={len(F_va)}")
 
-    print("Grid search (Halving)...")
-    search = HalvingGridSearchCV(
-        SVC(kernel="rbf", probability=False),
-        param_grid=PARAM_GRID,
-        factor=2,
-        scoring="accuracy",
-        random_state=SEED,
-        n_jobs=1,
-    )
+    svc = SVC(kernel="rbf", probability=False)
+    print("Grid search (full GridSearchCV)...")
+    search = GridSearchCV(
+        svc, cfg["params"], cv=3, scoring="accuracy", n_jobs=2, verbose=1)
     search.fit(F_tr, y_tr)
     print(f"Best params: {search.best_params_}  "
-          f"(val acc {search.best_score_:.4f})")
+          f"(CV acc {search.best_score_:.4f})")
 
     best = search.best_params_
     print("\nFitting final calibrated SVM (isotonic, cv=5) on full train...")
@@ -382,34 +342,24 @@ def train():
     model.fit(F_train, y_train)
 
     train_acc = model.score(F_train, y_train)
-    test_acc = model.score(F_test, y_test)
-    preds = model.predict(F_test)
     print(f"Train accuracy: {train_acc:.4f}")
-    print(f"Test accuracy:  {test_acc:.4f}")
-
-    # Report calibration headroom for the 0.80 unknown gate
-    proba = model.predict_proba(F_test)
-    maxc = np.max(proba, axis=1)
-    correct = preds == y_test
-    print(f"\nTop-1 confidence stats on test: "
-          f"mean={maxc.mean():.3f} median={np.median(maxc):.3f} "
-          f"max={maxc.max():.3f}")
-    for t in (0.3, 0.4, 0.5, 0.6, 0.8):
-        lab = maxc >= t
-        cor = (lab & correct).sum()
-        print(f"  >= {t:.2f}: correct/{int(lab.sum())} recorded "
-              f"({cor}/{int(lab.sum())} correct) -> "
-              f"precision {cor / max(int(lab.sum()), 1):.3f}")
 
     os.makedirs(MODEL_DIR, exist_ok=True)
-    joblib.dump(model, MODEL_PKL)
-    print(f"Model saved to {MODEL_PKL}")
+    model_path = os.path.join(MODEL_DIR, cfg["model"])
+    joblib.dump(model, model_path, compress=3)
+    print(f"Model saved to {model_path}")
 
 
 # Inference ================================================================
 def predict_face(frame_bgr, model, hog, pp_art, detector):
-    feat, box = frame_to_features(frame_bgr, detector, hog,
-                                  image_size=pp_art["image_size"])
+    style = pp_art.get("crop_style", "relaxed")
+    if style == "direct":
+        face_bgr, box = frame_bgr, None
+        # direct mode has no face box: still classify the whole frame
+    else:
+        face_bgr, box = detect_align_crop_relaxed(frame_bgr, detector)
+    gray = preprocess_gray(face_bgr, size=pp_art["image_size"])
+    feat = hog.compute(gray).reshape(1, -1)
     if box is None:
         return None, 0.0, None
     feat = transform_features(feat, pp_art)
@@ -419,8 +369,8 @@ def predict_face(frame_bgr, model, hog, pp_art, detector):
     return name, float(proba[idx]), box
 
 
-def recognize_image(path, display=True):
-    model, hog, pp_art = load_model_and_preprocess()
+def recognize_image(path, display=True, mode="crop"):
+    model, hog, pp_art = load_model_and_preprocess(mode)
     detector = make_detector()
     frame = cv2.imread(path)
     if frame is None:
@@ -454,14 +404,13 @@ def recognize_image(path, display=True):
 
 
 # Evaluation ===============================================================
-def evaluate():
-    pp = load_preprocess()
-    model = joblib.load(MODEL_PKL)
-    detector = make_detector()
+def evaluate(mode="crop"):
+    cfg = config(mode)
+    pp = load_preprocess(mode)
+    model = joblib.load(os.path.join(MODEL_DIR, cfg["model"]))
     hog = make_hog(pp)
 
-    F_test, y_test_names = load_features_from_folders(
-        os.path.join(DATA_DIR, "test"), detector, hog)
+    F_test, y_test_names = load_features(os.path.join(DATA_DIR, "test"), cfg, hog)
     keep = np.array([c in pp["label_to_idx"] for c in y_test_names])
     F_test, y_test_names = F_test[keep], np.array(y_test_names)[keep]
     y_test = np.array([pp["label_to_idx"][c] for c in y_test_names])
@@ -481,12 +430,13 @@ def evaluate():
     print(f"Recall (macro)    : {rec:.4f}")
     print(f"F1 score (macro)  : {f1:.4f}")
 
+    report = classification_report(y_test, y_pred,
+                                   target_names=pp["classes"],
+                                   zero_division=0)
     print("\nClassification report:")
-    print(classification_report(y_test, y_pred,
-                                target_names=pp["classes"],
-                                zero_division=0))
+    print(report)
 
-    # Gating / unknown-rejection analysis (webcam-style, shared pipeline)
+    # Gating / unknown-rejection analysis (webcam-style)
     mc = proba.max(axis=1)
     gate_correct = (mc >= GATE) & (y_pred == y_test)
     gate_n = int((mc >= GATE).sum())
@@ -496,19 +446,19 @@ def evaluate():
     print(f"  decided: {gate_n}/{len(y_test)}  precision {gate_prec:.4f}  "
           f"recall {gate_rec:.4f}\n")
     print("Threshold sweep:")
-    for t in (0.45, 0.50, 0.55, 0.60, 0.65, 0.70):
+    for t in (0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.80, 0.90):
         lab = mc >= t
         cor = ((lab) & (y_pred == y_test)).sum()
         print(f"  >= {t:.2f}: precision {cor / max(int(lab.sum()), 1):.4f}  "
               f"recall {cor / len(y_test):.4f}  decided {int(lab.sum())}")
 
-    # Save numeric results
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     labels = sorted(set(y_test) | set(y_pred))
     class_names = [pp["idx_to_label"][i] for i in labels]
     conf = confusion_matrix(y_test, y_pred, labels=labels)
 
-    with open(OUT_CSV, "w") as fh:
+    metrics_path = os.path.join(OUTPUT_DIR, "results.csv")
+    with open(metrics_path, "w") as fh:
         fh.write("metric,value\n")
         fh.write(f"accuracy_argmax,{acc:.4f}\n")
         fh.write(f"precision_macro,{prec:.4f}\n")
@@ -518,38 +468,50 @@ def evaluate():
         fh.write(f"gate_precision,{gate_prec:.4f}\n")
         fh.write(f"gate_recall,{gate_rec:.4f}\n")
         fh.write(f"gate_decided,{gate_n}\n")
-    print(f"Results saved to {OUT_CSV}")
+    print(f"Results saved to {metrics_path}")
 
-    # Per-image gating results
-    with open(OUT_IMG, "w") as fh:
+    per_img_path = os.path.join(OUTPUT_DIR, "per_image.csv")
+    with open(per_img_path, "w") as fh:
         fh.write("file,true,pred,confidence,gated\n")
         for fname, t, p, c, ai in zip(
                 y_test_names, y_test, y_pred, mc, (mc >= GATE)):
             g = "recognized" if bool(ai) else "unknown"
             fh.write(f"{fname},{pp['idx_to_label'][t]},{pp['idx_to_label'][p]},"
                      f"{c:.4f},{g}\n")
-    print(f"Per-image results saved to {OUT_IMG}")
+    print(f"Per-image results saved to {per_img_path}")
 
-    # Confusion matrix figure
+    with open(os.path.join(OUTPUT_DIR, "classification_report.txt"), "w") as fh:
+        fh.write(report)
+
     disp = ConfusionMatrixDisplay(confusion_matrix=conf,
                                   display_labels=class_names)
     fig, ax = plt.subplots(figsize=(14, 12))
     disp.plot(ax=ax, cmap="Blues", colorbar=True)
-    ax.set_title("Face Recognition Confusion Matrix (HOG + SVM)")
+    ax.set_title(f"Face Recognition Confusion Matrix "
+                 f"(HOG + SVM - {cfg['crop_style']})")
     plt.tight_layout()
-    fig.savefig(OUT_CM, dpi=150)
-    print(f"Confusion matrix saved to {OUT_CM}")
+    cm_path = os.path.join(OUTPUT_DIR, "confusion_matrix.png")
+    fig.savefig(cm_path, dpi=150)
+    print(f"Confusion matrix saved to {cm_path}")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="HOG + SVM face recognition (train / evaluate / recognize)")
+        description="HOG + SVM face recognition (single pipeline: "
+                    "train / evaluate / recognize)")
     sub = parser.add_subparsers(dest="command")
 
-    sub.add_parser("train", help="Train the SVM and save artifacts")
-    sub.add_parser("evaluate", help="Evaluate the trained SVM on the test set")
+    def add_mode(p):
+        p.add_argument("--mode", choices=("crop", "direct"), default="crop",
+                       help="input mode (default: crop)")
+
+    p_train = sub.add_parser("train", help="Train the SVM and save artifacts")
+    add_mode(p_train)
+    p_eval = sub.add_parser("evaluate", help="Evaluate a trained SVM on the test set")
+    add_mode(p_eval)
 
     p_rec = sub.add_parser("recognize", help="Recognize a single image")
+    add_mode(p_rec)
     p_rec.add_argument("image", help="Path to the image file")
     p_rec.add_argument("--no-display", action="store_true",
                        help="Do not pop up a display window (headless)")
@@ -557,11 +519,11 @@ def main():
     args = parser.parse_args()
 
     if args.command == "train":
-        train()
+        train(args.mode)
     elif args.command == "evaluate":
-        evaluate()
+        evaluate(args.mode)
     elif args.command == "recognize":
-        recognize_image(args.image, display=not args.no_display)
+        recognize_image(args.image, display=not args.no_display, mode=args.mode)
     else:
         parser.print_help()
 

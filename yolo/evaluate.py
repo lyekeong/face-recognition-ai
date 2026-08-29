@@ -168,7 +168,7 @@ def main():
               encoding="utf-8") as fh:
         fh.write("file,true,pred,confidence,detected,gated\n")
         for f, t, pp, c, dd, g in zip(
-                files, trues, preds, confs, dets, confs >= 0.80):
+                files, trues, preds, confs, dets, confs >= 0.60):
             fh.write(f"{f},{class_names[t]},{class_names[pp]},{c:.4f},"
                      f"{'yes' if dd else 'no'},{'yes' if g else 'no'}\n")
 
