@@ -1,21 +1,11 @@
-"""YOLO face recognition pipeline: YOLOv8n-face detector + ResNet classifier.
-
-Subcommands:
-  train     -- fine-tune the ResNet-18/50 classifier on dataset_split/train
-               (delegates the training loop to resnet.py).
-  evaluate  -- full end-to-end pipeline (YOLOv8n-face detect -> margin crop
-               -> ResNet classify) on the 360-image test set; writes
-               output/results.csv, per_image.csv and confusion_matrix.png.
-
-The classifier (model + training) lives in resnet.py; face detection/crop/
-transforms live in preprocessing.py.
-"""
-import argparse
+import json
 import os
 
 import cv2
 import numpy as np
 import torch
+from torchvision import transforms
+from ultralytics import YOLO
 from sklearn.metrics import (accuracy_score, classification_report,
                              confusion_matrix, ConfusionMatrixDisplay)
 
@@ -23,17 +13,73 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from preprocessing import (DETECTOR_PATH, TRANSFORM, crop_face,
-                           detect_largest_face)
-from resnet import (BACKBONES, OUT_DIR, align_index, load_arch,
-                    make_model_for_inference, train)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+OUT_DIR = os.path.join(BASE_DIR, "output")
+DETECTOR_PATH = os.path.join(BASE_DIR, "yolov8n-face.pt")
+TEST_DIR = "./dataset_split/test"
 
-TEST_DIR = "../dataset_split/test"
+MEAN = [0.485, 0.456, 0.406]
+STD = [0.229, 0.224, 0.225]
+MIN_FACE_SIZE = (80, 80)
+MARGIN_RATIO = 0.20
+DETECT_CONF = 0.70
+
+TRANSFORM = transforms.Compose([
+    transforms.ToPILImage(),
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=MEAN, std=STD),
+])
 
 
-def evaluate():
-    from ultralytics import YOLO
+def load_arch():
+    with open(os.path.join(OUT_DIR, "arch.json"), encoding="utf-8") as fh:
+        return json.load(fh)
 
+
+def build_model(backbone, num_classes):
+    from train_classifier import make_model_for_inference
+    model = make_model_for_inference(backbone, num_classes)
+    return model
+
+
+def align_index(backbone):
+    return "resnet18" if backbone == "resnet18" else "resnet50"
+
+
+def crop_face(frame, box):
+    xmin, ymin, xmax, ymax = box
+    h, w = frame.shape[:2]
+    pad_x = int((xmax - xmin) * MARGIN_RATIO)
+    pad_y = int((ymax - ymin) * MARGIN_RATIO)
+    x1, y1 = max(0, xmin - pad_x), max(0, ymin - pad_y)
+    x2, y2 = min(w, xmax + pad_x), min(h, ymax + pad_y)
+    crop = frame[y1:y2, x1:x2]
+    return None if crop.size == 0 else crop
+
+
+def detect_largest_face(frame, yolo):
+    results = yolo.predict(source=frame, conf=DETECT_CONF, verbose=False)
+    best = None
+    best_area = 0
+    for result in results:
+        for box in result.boxes:
+            if int(box.cls[0]) != 0:
+                continue
+            x = box.xyxy[0].cpu().numpy()
+            area = (x[2] - x[0]) * (x[3] - x[1])
+            if area > best_area:
+                best_area = area
+                best = x
+    if best is None:
+        return None
+    x0, y0, x1, y1 = map(int, best)
+    if (x1 - x0) < MIN_FACE_SIZE[0] or (y1 - y0) < MIN_FACE_SIZE[1]:
+        return None
+    return (x0, y0, x1, y1)
+
+
+def main():
     arch = load_arch()
     backbone = arch["backbone"]
     num_classes = arch["num_classes"]
@@ -41,7 +87,7 @@ def evaluate():
     model_path = os.path.join(OUT_DIR, f"{align_index(backbone)}_faces.pth")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = make_model_for_inference(backbone, num_classes)
+    model = build_model(backbone, num_classes)
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.to(device).eval()
 
@@ -158,33 +204,6 @@ def evaluate():
     fig.savefig(os.path.join(OUT_DIR, "confusion_matrix.png"), dpi=150)
     print("\nSaved output/results.csv, output/per_image.csv, "
           "output/confusion_matrix.png")
-
-
-def main():
-    parser = argparse.ArgumentParser(
-        description="YOLO face recognition (detector + ResNet-18/50): "
-                    "train the classifier or evaluate the full pipeline")
-    sub = parser.add_subparsers(dest="command")
-
-    p_train = sub.add_parser("train", help="Train the face classifier (YOLO crop)")
-    p_train.add_argument("--backbone", choices=BACKBONES, default="resnet18")
-    p_train.add_argument("--epochs", type=int, default=60)
-    p_train.add_argument("--batch-size", type=int, default=32)
-    p_train.add_argument("--lr", type=float, default=0.001)
-    p_train.add_argument("--momentum", type=float, default=0.9)
-    p_train.add_argument("--weight-decay", type=float, default=5e-4)
-    p_train.add_argument("--patience", type=int, default=10)
-    p_train.add_argument("--seed", type=int, default=42)
-
-    sub.add_parser("evaluate", help="Evaluate the pipeline on the test set")
-
-    args = parser.parse_args()
-    if args.command == "train":
-        train(args)
-    elif args.command == "evaluate":
-        evaluate()
-    else:
-        parser.print_help()
 
 
 if __name__ == "__main__":

@@ -16,7 +16,7 @@ from tkinter import font as tkfont
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CNN_DIR = os.path.join(ROOT, "cnn")
 YOLO_DIR = os.path.join(ROOT, "yolo")
-ML_DIR = os.path.join(ROOT, "machine learning")
+ML_DIR = os.path.join(ROOT, "machine learning", "src")
 for _d in (YOLO_DIR, ML_DIR):
     if _d not in sys.path:
         sys.path.insert(0, _d)
@@ -180,12 +180,13 @@ class CNNBackend:
             boxes = boxes[:CNN_MAX_FACES]
         if not boxes:
             return ann, results
-        crops = [c for c in (_cnn_crop_face(frame, b) for b in boxes)
-                 if c is not None]
-        if not crops:
+        crops = [_cnn_crop_face(frame, b) for b in boxes]
+        valid = [(b, c) for b, c in zip(boxes, crops) if c is not None]
+        if not valid:
             return ann, results
-        preds = _cnn_predict_faces(self.model, self.class_names, crops)
-        for face_data, (name, conf) in zip(boxes, preds):
+        valid_boxes, valid_crops = zip(*valid)
+        preds = _cnn_predict_faces(self.model, self.class_names, list(valid_crops))
+        for face_data, (name, conf) in zip(valid_boxes, preds):
             _, x, y, w, h, _ = face_data
             box = format_box((x, y, w, h))
             if conf < CNN_UNKNOWN_THRESHOLD:
@@ -206,7 +207,7 @@ class YOLOBackend:
 
     def load(self):
         from torchvision import transforms
-        import resnet
+        import train_classifier
         from ultralytics import YOLO
 
         arch_path = os.path.join(YOLO_DIR, "output", "arch.json")
@@ -223,7 +224,7 @@ class YOLOBackend:
                 f"YOLO artifacts missing: {weights} or {yolo_path}")
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.resnet = resnet.make_model_for_inference(
+        self.resnet = train_classifier.make_model_for_inference(
             backbone, num_classes)
         self.resnet.load_state_dict(torch.load(weights, map_location=self.device))
         self.resnet.to(self.device)
@@ -535,3 +536,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    

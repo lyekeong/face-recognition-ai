@@ -9,8 +9,8 @@ gate_0.50_precision,0.9027
 gate_0.50_recall,0.4639
 gate_0.60_precision,0.9433
 gate_0.60_recall,0.3694
-gate_0.70_precision,0.9608
-gate_0.70_recall,0.2722
+gate_0.70_precision,0.9612
+gate_0.70_recall,0.2750
 gate_0.80_precision,0.9706
 gate_0.80_recall,0.1833
 gate_0.90_precision,1.0000
