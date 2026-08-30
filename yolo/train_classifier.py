@@ -13,8 +13,8 @@ from sklearn.metrics import classification_report
 from sklearn.model_selection import train_test_split
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-TRAIN_DIR = "../dataset_split/train"
-TEST_DIR = "../dataset_split/test"
+TRAIN_DIR = "./dataset_split/train"
+TEST_DIR = "./dataset_split/test"
 OUT_DIR = os.path.join(BASE_DIR, "output")
 
 MEAN = [0.485, 0.456, 0.406]

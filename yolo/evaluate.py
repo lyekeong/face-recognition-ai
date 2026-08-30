@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 OUT_DIR = os.path.join(BASE_DIR, "output")
 DETECTOR_PATH = os.path.join(BASE_DIR, "yolov8n-face.pt")
-TEST_DIR = "../dataset_split/test"
+TEST_DIR = "./dataset_split/test"
 
 MEAN = [0.485, 0.456, 0.406]
 STD = [0.229, 0.224, 0.225]
