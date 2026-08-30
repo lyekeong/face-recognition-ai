@@ -1,7 +1,6 @@
 import json
 from pathlib import Path
 
-import cv2
 import matplotlib
 
 matplotlib.use("Agg")
@@ -21,10 +20,11 @@ from sklearn.metrics import (
 from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader, TensorDataset
 
+from preprocessing import IMG_SIZE, MODEL_MEAN, MODEL_STD, load_pixels
+
 SEED = 42
 SPLIT_DIR = Path("..") / "dataset_split"
 OUTPUT_DIR = Path("outputs_cnn")
-IMG_SIZE = (96, 96)
 BATCH_SIZE = 32
 EPOCHS = 80
 PATIENCE = 15
@@ -34,17 +34,14 @@ MIN_LR_RATIO = 0.02
 LABEL_SMOOTHING = 0.1
 VAL_RATIO = 0.15
 VALID_EXTS = {".jpg", ".jpeg", ".png"}
-FACE_CROP_MARGIN = 0.20
-DETECTOR_PATH = Path("models") / "face_detection_yunet_2023mar.onnx"
-CLAHE = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 
 torch.manual_seed(SEED)
 np.random.seed(SEED)
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-MODEL_MEAN = torch.tensor([0.485, 0.456, 0.406], device=DEVICE).view(1, 3, 1, 1)
-MODEL_STD = torch.tensor([0.229, 0.224, 0.225], device=DEVICE).view(1, 3, 1, 1)
+MODEL_MEAN = MODEL_MEAN.to(DEVICE)
+MODEL_STD = MODEL_STD.to(DEVICE)
 
 
 def collect_images(dataset_dir):
@@ -57,48 +54,6 @@ def collect_images(dataset_dir):
                 filepaths.append(fp)
                 labels.append(label_map[name])
     return filepaths, labels, class_names
-
-
-def align_face(img_rgb, face):
-    left_eye = (face[4], face[5])
-    right_eye = (face[6], face[7])
-    dx = right_eye[0] - left_eye[0]
-    dy = right_eye[1] - left_eye[1]
-    angle = np.degrees(np.arctan2(dy, dx))
-    center = ((left_eye[0] + right_eye[0]) / 2, (left_eye[1] + right_eye[1]) / 2)
-    M = cv2.getRotationMatrix2D(center, angle, 1.0)
-    return cv2.warpAffine(img_rgb, M, (img_rgb.shape[1], img_rgb.shape[0]),
-                          flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
-
-
-def load_pixels(filepaths, labels):
-    detector = cv2.FaceDetectorYN.create(str(DETECTOR_PATH), "", (320, 320))
-    images = np.empty((len(filepaths), *IMG_SIZE, 3), dtype=np.uint8)
-    valid_labels = []
-    skipped = 0
-    for fp, lb in zip(filepaths, labels):
-        img_bgr = cv2.imread(str(fp))
-        if img_bgr is None:
-            skipped += 1
-            continue
-        h, w = img_bgr.shape[:2]
-        detector.setInputSize((w, h))
-        _, faces = detector.detect(img_bgr)
-        img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-        if faces is not None and len(faces) > 0:
-            f = max(faces, key=lambda f: float(f[14]))
-            fx, fy, fw, fh = int(f[0]), int(f[1]), int(f[2]), int(f[3])
-            mh, mw = int(fh * FACE_CROP_MARGIN), int(fw * FACE_CROP_MARGIN)
-            y1, y2 = max(0, fy - mh), min(h, fy + fh + mh)
-            x1, x2 = max(0, fx - mw), min(w, fx + fw + mw)
-            img_rgb = align_face(img_rgb, f)
-            img_rgb = img_rgb[y1:y2, x1:x2]
-        img_gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY)
-        img_gray = CLAHE.apply(img_gray)
-        img_rgb = cv2.cvtColor(img_gray, cv2.COLOR_GRAY2RGB)
-        images[len(valid_labels)] = cv2.resize(img_rgb, IMG_SIZE)
-        valid_labels.append(lb)
-    return images[: len(valid_labels)], np.array(valid_labels), skipped
 
 
 class ConvBlock(nn.Module):

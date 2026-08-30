@@ -1,4 +1,11 @@
-import argparse
+"""ResNet-18/50 face classifier for the YOLO pipeline.
+
+Everything that defines, finetunes, stores and re-loads the ResNet-18/50
+classifier lives here so yolo.py only keeps the YOLOv8n-face detector, the
+evaluate pipeline and the CLI.
+
+Train/eval transforms come from preprocessing.py.
+"""
 import json
 import os
 import time
@@ -7,18 +14,16 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torchvision import datasets, transforms, models
-from torch.utils.data import DataLoader, Subset
 from sklearn.metrics import classification_report
 from sklearn.model_selection import train_test_split
+from torch.utils.data import DataLoader, Subset
+from torchvision import datasets, models
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+from preprocessing import BASE_DIR, build_transforms
+
 TRAIN_DIR = "../dataset_split/train"
 TEST_DIR = "../dataset_split/test"
 OUT_DIR = os.path.join(BASE_DIR, "output")
-
-MEAN = [0.485, 0.456, 0.406]
-STD = [0.229, 0.224, 0.225]
 
 BACKBONES = ("resnet18", "resnet50")
 
@@ -49,26 +54,6 @@ def make_model_for_inference(backbone, num_classes):
     return model
 
 
-def build_transforms():
-    train_transform = transforms.Compose([
-        transforms.Resize((256, 256)),
-        transforms.RandomResizedCrop(224, scale=(0.7, 1.0)),
-        transforms.RandomHorizontalFlip(),
-        transforms.RandomRotation(10),
-        transforms.ColorJitter(brightness=0.2, contrast=0.2,
-                               saturation=0.2, hue=0.05),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=MEAN, std=STD),
-        transforms.RandomErasing(p=0.2),
-    ])
-    eval_transform = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=MEAN, std=STD),
-    ])
-    return train_transform, eval_transform
-
-
 def split_train_val(train_dataset, val_ratio=0.10, seed=42):
     targets = np.array(train_dataset.targets)
     idx = np.arange(len(train_dataset))
@@ -88,18 +73,16 @@ def save_arch_json(path, backbone, num_classes, class_names, val_acc, test_acc):
         }, fh, indent=2)
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Train face classifier (YOLO crop)")
-    parser.add_argument("--backbone", choices=BACKBONES, default="resnet18")
-    parser.add_argument("--epochs", type=int, default=60)
-    parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--lr", type=float, default=0.001)
-    parser.add_argument("--momentum", type=float, default=0.9)
-    parser.add_argument("--weight-decay", type=float, default=5e-4)
-    parser.add_argument("--patience", type=int, default=10)
-    parser.add_argument("--seed", type=int, default=42)
-    args = parser.parse_args()
+def load_arch():
+    with open(os.path.join(OUT_DIR, "arch.json"), encoding="utf-8") as fh:
+        return json.load(fh)
 
+
+def align_index(backbone):
+    return "resnet18" if backbone == "resnet18" else "resnet50"
+
+
+def train(args):
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
@@ -207,10 +190,6 @@ def main():
     save_arch_json(arch_file, args.backbone, num_classes,
                    class_names, best_val_acc, test_acc)
     print(f"Arch info saved to {arch_file}")
-    print("NOTE: arch.json points evaluate.py and the GUI (yolo backend) to "
-          "the architecture of the LAST trained model. For inference with a "
-          "different backbone, retrain or edit the file.")
-
-
-if __name__ == "__main__":
-    main()
+    print("NOTE: arch.json points the 'evaluate' subcommand and the GUI (yolo "
+          "backend) to the architecture of the LAST trained model. For "
+          "inference with a different backbone, retrain or edit the file.")

@@ -16,7 +16,7 @@ from tkinter import font as tkfont
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CNN_DIR = os.path.join(ROOT, "cnn")
 YOLO_DIR = os.path.join(ROOT, "yolo")
-ML_DIR = os.path.join(ROOT, "machine learning", "src")
+ML_DIR = os.path.join(ROOT, "machine learning")
 for _d in (YOLO_DIR, ML_DIR):
     if _d not in sys.path:
         sys.path.insert(0, _d)
@@ -206,7 +206,7 @@ class YOLOBackend:
 
     def load(self):
         from torchvision import transforms
-        import train_classifier
+        import resnet
         from ultralytics import YOLO
 
         arch_path = os.path.join(YOLO_DIR, "output", "arch.json")
@@ -223,7 +223,7 @@ class YOLOBackend:
                 f"YOLO artifacts missing: {weights} or {yolo_path}")
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.resnet = train_classifier.make_model_for_inference(
+        self.resnet = resnet.make_model_for_inference(
             backbone, num_classes)
         self.resnet.load_state_dict(torch.load(weights, map_location=self.device))
         self.resnet.to(self.device)
