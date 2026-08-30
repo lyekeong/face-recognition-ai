@@ -68,7 +68,7 @@ def load_yolo():
         bb = "ResNet" + bb[6:]
     return {
         "method": "YOLO",
-        "algorithm": f"YuNet detector + {bb} classifier",
+        "algorithm": f"YOLOv8n-face detector + {bb} classifier",
         "test_accuracy": arch.get("test_acc", float("nan")),
         "precision_macro": r["precision_macro"],
         "recall_macro": r["recall_macro"],
