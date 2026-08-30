@@ -5,3 +5,4 @@ __pycache__/
 
 # Output artifacts / caches
 .DS_Store
+.venv

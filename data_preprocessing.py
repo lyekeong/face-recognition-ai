@@ -90,8 +90,7 @@ def process_dataset(raw_dir, output_dir, target_size):
         
         crop_and_save(train_files, train_dir, "Train", is_train=True)
         crop_and_save(test_files, test_dir, "Test", is_train=False)
-
-    print(f"\n✅ 数据预处理完成！物理划分的数据集已保存至: {output_dir}")
+        
 
 if __name__ == "__main__":
     process_dataset(RAW_DATA_DIR, OUTPUT_DIR, IMG_TARGET_SIZE)
